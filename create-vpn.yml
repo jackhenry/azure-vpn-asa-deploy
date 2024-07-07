@@ -1,0 +1,242 @@
+- hosts: localhost
+  connection: local
+  gather_facts: no
+
+  tasks:    
+
+    - name: Fetch Secrets
+      azure.azcollection.azure_rm_keyvaultsecret_info:
+        vault_uri: "{{ keyvaulturl }}"
+        name: "{{ item }}"
+      loop:
+        - "asa-user"
+        - "asa-pass"
+        - "asa-enable-pass"
+        - "vpn-shared-secret"
+      register: secrets
+
+    - name: Set ASA CLI provider
+      set_fact: 
+        cli:
+          host: "{{ inventory_hostname }}"
+          authorize: yes
+          username: "{{ secrets.results[0]['secrets'][0]['secret'] }}"
+          password: "{{ secrets.results[1]['secrets'][0]['secret'] }}"
+          auth_pass: "{{ secrets.results[2]['secrets'][0]['secret'] }}"
+        vpnsharedkey: "{{ secrets.results[3]['secrets'][0]['secret'] }}"
+
+    - name: Create resource group
+      azure_rm_resourcegroup:
+        name: "{{ resource_group }}"
+        location: "{{ location }}"
+
+    - name: Create vnet
+      azure_rm_virtualnetwork:
+        resource_group: "{{ resource_group }}"
+        name: "{{ vnet['name'] }}"
+        address_prefixes: "{{ vnet['address_net'] }}"
+
+    - name: Add subnet
+      azure_rm_subnet:
+        resource_group: "{{ resource_group }}"
+        name: "{{ vnet['subnet_name'] }}"
+        address_prefix: "{{ vnet['subnet_net'] }}"
+        virtual_network: "{{ vent['name'] }}"
+
+    - name: Add GatewaySubnet
+      azure_rm_subnet:
+        resource_group: "{{ resource_group }}"
+        name: "GatewaySubnet"
+        address_prefix: "{{ vnet['gw_subnet_net'] }}"
+        virtual_network: "{{ vnet['name'] }}"
+
+    - name: Create public IP
+      azure_rm_publicipaddress:
+        resource_group: "{{ resource_group }}"
+        allocation_method: Dynamic
+        name: "{{ vnet['public_ip_name'] }}"
+
+    - name: Create vnet gateway
+      azure_rm_virtualnetworkgateway:
+        resource_group: "{{ resource_group }}"
+        name: "{{ vnet['gw_name'] }}"
+        sku: "VpnGw1"
+        ip_configurations:
+        - name: "vnetgwipconfig"
+          private_ip_allocation_method: Dynamic
+          public_ip_address_name: "{{ vnet['public_ip_name'] }}"
+        enable_bgp: yes
+        virtual_network: "{{ vnet['name'] }}"
+        bgp_settings:
+          asn: 65515
+
+    - name: Get virtual network gateway info
+      azure_rm_resource_info:
+        resource_group: "{{ resource_group }}"
+        provider: network
+        resource_type: virtualNetworkGateways
+        resource_name: "{{ vnet['gw_name'] }}"
+        api_version: "2020-11-01"
+      register: vnetgw_info
+
+    - name: Set bgpPeeringAddress and tunnelIpAddresses public ip variables
+      set_fact: 
+        azvpnpeeraddress: "{{ vnetgw_info['response'][0]['properties']['bgpSettings']['bgpPeeringAddress'] }}" 
+        azvpnpubip: "{{ vnetgw_info['response'][0]['properties']['bgpSettings']['bgpPeeringAddresses'][0]['tunnelIpAddresses'][0] }}" 
+
+    - name: Create Local Network Gateway and VPN-Connection from template
+      azure_rm_deployment:
+        resource_group: "{{ resource_group }}"
+        name: LocalNetGWVPNConnDeployment
+        parameters:
+          LocalNetGWName:
+            value: "{{ local['gw_name'] }}"
+          gatewayIpAddress:
+            value: "{{ local['public_ip_addr'] }}"
+          addressPrefixes:
+            value: "{{ local['prefix'] }}"
+          asn:
+            value: "{{ local['asn'] }}"
+          bgpPeeringAddress:
+            value: "{{ local['gw_peer_addr'] }}"
+          VPNConnName:
+            value: "{{ local['vpn_conn_name'] }}"
+          VNetGW:
+            value: "{{ vnet['gw_name'] }}"
+          vpnSharedKey:
+            value: "{{ vpnsharedkey }}"
+        template_link: 'https://raw.githubusercontent.com/jackhenry/azure-vpn-asa-deploy/master/templates/vpn-conn-template.json'
+
+    - name: crypto ikev2 policy 10
+      cisco.asa.asa_config:
+        lines:
+        - encryption aes-gcm-256 aes-gcm-192 aes-gcm
+        - integrity null
+        - group 14 5 2
+        - prf sha512 sha384 sha256 sha
+        - lifetime seconds 86400
+        match: line
+        parents: [crypto ikev2 policy 10]
+        provider: "{{ cli }}"
+
+    - name: crypto ikev2 policy 20
+      cisco.asa.asa_config:
+        lines:
+        - encryption aes-256 aes-192 aes
+        - integrity sha512 sha384 sha256 sha
+        - group 14 5 2
+        - prf sha512 sha384 sha256 sha
+        - lifetime seconds 86400
+        match: line
+        parents: [crypto ikev2 policy 20]
+        provider: "{{ cli }}"
+
+    - name: crypto ikev2 enable outside
+      cisco.asa.asa_config:
+        lines:
+        - crypto ikev2 enable outside
+        match: line
+        provider: "{{ cli }}"
+
+    - name: crypto ipsec ikev2 ipsec-proposal AZURE-PROPOSAL
+      cisco.asa.asa_config:
+        lines:
+        - protocol esp encryption aes-256
+        - protocol esp integrity sha-256
+        match: line
+        parents: [crypto ipsec ikev2 ipsec-proposal AZURE-PROPOSAL]
+        provider: "{{ cli }}"
+
+    - name: crypto ipsec profile AZURE-PROPOSAL
+      cisco.asa.asa_config:
+        lines:
+        - set ikev2 ipsec-proposal AZURE-PROPOSAL
+        match: line
+        parents: [crypto ipsec profile AZURE-PROPOSAL]
+        provider: "{{ cli }}"
+
+    - name: group-policy AZURE internal
+      cisco.asa.asa_config:
+        lines:
+        - group-policy AZURE internal
+        match: line
+        provider: "{{ cli }}"
+
+    - name: group-policy AZURE attributes
+      cisco.asa.asa_config:
+        lines:
+        - vpn-tunnel-protocol ikev2
+        match: line
+        parents: [group-policy AZURE attributes]
+        provider: "{{ cli }}"
+
+    - name: "tunnel-group {{ azvpnpubip }} type ipsec-l2l"
+      cisco.asa.asa_config:
+        lines:
+        - "tunnel-group {{ azvpnpubip }} type ipsec-l2l"
+        match: line
+        provider: "{{ cli }}"
+
+    - name: "tunnel-group {{ azvpnpubip }} general-attributes"
+      cisco.asa.asa_config:
+        lines:
+        - default-group-policy AZURE
+        match: line
+        parents: ["tunnel-group {{ azvpnpubip }} general-attributes"]
+        provider: "{{ cli }}"
+
+    - name: "tunnel-group {{ azvpnpubip }} ipsec-attributes"
+      cisco.asa.asa_config:
+        lines:
+        - "ikev2 remote-authentication pre-shared-key {{ vpnsharedkey }}"
+        - "ikev2 local-authentication pre-shared-key {{ vpnsharedkey }}"
+        match: line
+        parents: ["tunnel-group {{ azvpnpubip }} ipsec-attributes"]
+        provider: "{{ cli }}"
+
+    - name: interface Tunnel1
+      cisco.asa.asa_config:
+        lines:
+        - nameif AZURE
+        - "ip address {{ local['gw_peer_addr'] }} 255.255.255.252"
+        - tunnel source interface outside
+        - "tunnel destination {{ azvpnpubip }}"
+        - tunnel mode ipsec ipv4
+        - tunnel protection ipsec profile AZURE-PROPOSAL
+        - no shutdown
+        match: line
+        parents: [interface Tunnel1]
+        provider: "{{ cli }}"
+
+    - name: "route AZURE {{ azvpnpeeraddress }} 255.255.255.255 {{ local['vpn_route_ip'] }} 1"
+      cisco.asa.asa_config:
+        lines:
+        - "route AZURE {{ azvpnpeeraddress }} 255.255.255.255 {{ local['vpn_route_ip'] }} 1"
+        match: line
+        provider: "{{ cli }}"
+
+    - name: router bgp {{ local['asn'] }}
+      cisco.asa.asa_config:
+        lines:
+        - bgp log-neighbor-changes
+        - bgp graceful-restart
+        match: line
+        parents: [router bgp {{ local['asn'] }}]
+        provider: "{{ cli }}"
+
+    - name: router bgp {{ local['asn'] }}, address-family ipv4 unicast
+      cisco.asa.asa_config:
+        lines:
+        - "neighbor {{ azvpnpeeraddress }} remote-as 65515"
+        - "neighbor {{ azvpnpeeraddress }} ebgp-multihop 255"
+        - "neighbor {{ azvpnpeeraddress }} activate"
+        - "network {{ local['prefix'] }}"
+        - "network {{ local['net'] }}"
+        - no auto-summary
+        - no synchronization
+        - exit-address-family
+        match: line
+        parents: 
+          - router bgp {{ local['asn'] }}
+          - address-family ipv4 unicast
+        provider: "{{ cli }}"  

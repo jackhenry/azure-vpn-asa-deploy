@@ -1,0 +1,22 @@
+resource_group: VPN-RG
+location: westus2
+keyvaulturl: "keyvault-address-here" # Azure Key Vault Address
+sharedkey: "a secret" # IKEV2 Shared Secret
+vnet:
+  name: VNet1 # Name of Azure Virtual Network
+  address_net: 172.177.0.0/16 # VNet Address Space
+  subnet_net: 172.177.0.0/24 # First VNet Subnet
+  subnet_name: "Resource Subnet" # First Vnet Subnet Name
+  gw_subnet_net: 172.177.10.0/24 # Required GatewaySubnet Network
+  gw_name: VnetGw1 # VPN Gateway NAme
+  public_ip_name: GwPip # Public IP Name
+local:
+  gw_name: "ASAGW" # Local Gateway Name
+  public_ip_addr: 1.1.1.1 # Public IP Address of Local Device
+  prefix: 192.168.10.0/24 # Local Network on Device
+  net: "192.168.10.0 mask 255.255.255.0"
+  gw_peer_addr: 192.168.20.2 # BGP Peering Address
+  gw_peer_addr_net: "192.168.20.0 mask 255.255.255.252"
+  vpn_route_ip: 192.168.20.3
+  asn: 64555 # Local Device ASN
+  vpn_conn_name: AzureVPN # VPN Tunnel Interface Name

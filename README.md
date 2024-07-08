@@ -25,7 +25,6 @@ These playbooks depend on the Azure Ansible collection.
 
 Documentation for setup can be found [here.](https://galaxy.ansible.com/ui/repo/published/azure/azcollection/docs/?extIdCarryOver=true&sc_cid=701f2000001OH7YAAW)
 
-
 ### Update `vars.yml`
 
 After cloning the repository, locate and update the `vars.yml` file:
@@ -61,16 +60,29 @@ local:
   vpn_conn_name: AzureVPN # VPN Tunnel Interface Name
 ```
 
+### ASA Setup
+
+The ASA device must be accessible from the Ansible Control Node.
+
+You must create an inventory file and include the ASA device as a host before running the playbook.
+
+For example, if your ASA device has the IP address of `192.168.20.1`, create the following inventory file:
+
+```
+[asadevices]
+192.168.20.1
+```
+
 ## Running the Playbooks
 
 ### VPN Creation
 
 ```
-ansible-playbook create-vpn.yml --extra-vars "@vars.yml"
+ansible-playbook create-vpn.yml -i path/to/inventory --extra-vars "@vars.yml"
 ```
 
 ### VPN Removal
 
 ```
-ansible-playbook rm-vpn.yml --extra-vars "@vars.yml"
+ansible-playbook rm-vpn.yml -i path/to/inventory --extra-vars "@vars.yml"
 ```

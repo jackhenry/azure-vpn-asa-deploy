@@ -1,4 +1,4 @@
-- hosts: localhost
+- hosts: asadevices
   connection: local
   gather_facts: no
 
